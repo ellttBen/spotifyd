@@ -8,12 +8,13 @@ use futures::{
     stream::Peekable,
     Future, FutureExt, StreamExt,
 };
-use librespot_connect::spirc::Spirc;
+use librespot_connect::{config::ConnectConfig, spirc::Spirc};
 use librespot_core::{
     authentication::Credentials,
     cache::Cache,
-    config::{ConnectConfig, DeviceType, SessionConfig},
+    config::{DeviceType, SessionConfig},
     session::{Session, SessionError},
+    Error,
 };
 use librespot_discovery::Discovery;
 use librespot_playback::{
@@ -27,7 +28,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 pub struct AudioSetup {
-    pub mixer: Box<dyn FnMut() -> Box<dyn Mixer>>,
+    pub mixer: Box<dyn FnMut() -> Arc<dyn Mixer>>,
     pub backend: fn(Option<String>, AudioFormat) -> Box<dyn Sink>,
     pub audio_device: Option<String>,
     pub audio_format: AudioFormat,
@@ -77,7 +78,6 @@ pub(crate) struct MainLoop {
     pub(crate) spotifyd_state: SpotifydState,
     pub(crate) player_config: PlayerConfig,
     pub(crate) session_config: SessionConfig,
-    pub(crate) autoplay: bool,
     pub(crate) has_volume_ctrl: bool,
     pub(crate) initial_volume: Option<u16>,
     pub(crate) shell: String,
@@ -90,15 +90,16 @@ pub(crate) struct MainLoop {
 }
 
 impl MainLoop {
-    async fn get_session(&mut self) -> Result<Session, SessionError> {
+    async fn get_session(&mut self) -> Result<Session, librespot_core::Error> {
         let creds = self.credentials_provider.get_credentials().await;
 
         let session_config = self.session_config.clone();
         let cache = self.spotifyd_state.cache.clone();
 
-        Session::connect(session_config, creds, cache, false)
-            .await
-            .map(|(session, _creds)| session)
+        let session = Session::new(session_config, cache);
+
+        session.connect(creds, false).await?;
+        Ok(session)
     }
 
     pub(crate) async fn run(&mut self) {
@@ -126,25 +127,31 @@ impl MainLoop {
             let backend = self.audio_setup.backend;
             let audio_device = self.audio_setup.audio_device.clone();
             let audio_format = self.audio_setup.audio_format;
-            let (player, mut event_channel) = Player::new(
+            let player = Player::new(
                 self.player_config.clone(),
                 session.clone(),
                 mixer.get_soft_volume(),
                 move || (backend)(audio_device, audio_format),
             );
+            let mut event_channel = player.get_player_event_channel();
+
+            let credentials = self.credentials_provider.get_credentials().await;
 
             let (spirc, spirc_task) = Spirc::new(
                 ConnectConfig {
-                    autoplay: self.autoplay,
                     name: self.spotifyd_state.device_name.clone(),
                     device_type: self.device_type,
                     initial_volume: self.initial_volume,
                     has_volume_ctrl: self.has_volume_ctrl,
+                    is_group: false,
                 },
                 session.clone(),
+                credentials,
                 player,
                 mixer,
-            );
+            )
+            .await
+            .unwrap();
 
             tokio::pin!(spirc_task);
 

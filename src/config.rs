@@ -853,10 +853,12 @@ pub(crate) fn get_internal_config(config: CliConfig) -> SpotifydConfig {
         device_name,
         player_config: pc,
         session_config: SessionConfig {
-            user_agent: version::VERSION_STRING.to_string(),
+            client_id: version::VERSION_STRING.to_string(),
             device_id,
             proxy: proxy_url,
             ap_port: Some(443),
+            autoplay: Some(autoplay),
+            ..Default::default()
         },
         onevent: config.shared_config.on_song_change_hook,
         pid,
